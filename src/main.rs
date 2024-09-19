@@ -1,11 +1,42 @@
 use serde_json;
-use std::{env, fs};
+use std::{env, fs, fmt};
 use serde_bencode::{de, ser, value::Value};
+
+#[derive(Debug)]
+enum TorrentError {
+    IoError(std::io::Error),
+    DecodeError(serde_bencode::Error),
+    MissingKey(&'static str),
+    UnexpectedType(&'static str),
+}
+
+impl fmt::Display for TorrentError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            TorrentError::IoError(e) => write!(f, "IO Error: {}", e),
+            TorrentError::DecodeError(e) => write!(f, "Decode Error: {}", e),
+            TorrentError::MissingKey(key) => write!(f, "Missing Key: {}", key),
+            TorrentError::UnexpectedType(key) => write!(f, "Unexpected Error: {}", key),
+        }
+    }
+}
+
+impl From <std::io::Error> for TorrentError {
+    fn from(error: std::io::Error) -> Self {
+        TorrentError::IoError(error)
+    }
+}
+
+impl From <serde_bencode::Error> for TorrentError {
+    fn from(error: serde_bencode::Error) -> Self {
+        TorrentError::DecodeError(error)
+    }
+}
 
 fn decode_torrent_file(file_path: &str) -> Value {
 
-    let torrent_content = fs::read(file_path).expect("Failed to read torrent file");
-    de::from_bytes(&torrent_content).expect("Failed to decode torrent file")
+    let torrent_content = fs::read(file_path);
+    Okde::from_bytes(&torrent_content)
 }
 
 
