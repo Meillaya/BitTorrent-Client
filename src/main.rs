@@ -1,8 +1,14 @@
+use hex;
+use reqwest;
 use serde_json;
 use std::{env, fs, fmt};
 use serde_bencode::{de, ser, value::Value};
+use serde_urlencoded;
 use sha1::{Sha1, Digest};
-use hex;
+use std::collections::HashMap;
+use reqwest::blocking::Client;
+use std::net::{Ipv4Addr, SocketAddrV4};
+
 
 #[derive(Debug)]
 enum TorrentError {
@@ -10,6 +16,7 @@ enum TorrentError {
     DecodeError(serde_bencode::Error),
     MissingKey(&'static str),
     UnexpectedType(&'static str),
+    ReqwestError(reqwest::Error),
 }
 
 impl fmt::Display for TorrentError {
@@ -19,6 +26,7 @@ impl fmt::Display for TorrentError {
             TorrentError::DecodeError(e) => write!(f, "Decode Error: {}", e),
             TorrentError::MissingKey(key) => write!(f, "Missing Key: {}", key),
             TorrentError::UnexpectedType(key) => write!(f, "Unexpected Error: {}", key),
+            TorrentError::ReqwestError(e) => write!(f, "Reqwest: {}", e),
         }
     }
 }
@@ -103,6 +111,27 @@ fn extract_torrent_info(decoded_value: Value) -> Result<(), TorrentError> {
 
             let info_hash = calculate_info_hash(info)?;
             println!("Info Hash: {}", info_hash);
+
+            let piece_length = info_dict.get("piece length".as_bytes())
+                .ok_or(TorrentError::MissingKey("piece length"))?;
+            if let Value::Int(piece_length_value) = piece_length {
+                println!("Piece Length: {}", piece_length_value);
+            } else {
+                return Err(TorrentError::UnexpectedType("piece length"));
+            }
+
+
+            let pieces = info_dict.get("pieces".as_bytes())
+                .ok_or(TorrentError::MissingKey("pieces"))?;
+            if let Value::Bytes(pieces_bytes) = pieces {
+
+                println!("Pieces Hashes:");
+                for chunk in pieces_bytes.chunks(20) {
+                    println!("{}", hex::encode(chunk));
+                }
+            } else {         
+                return Err(TorrentError::UnexpectedType("pieces"));
+            }
         } else {
             return Err(TorrentError::UnexpectedType("info"));
         }
@@ -121,6 +150,7 @@ fn calculate_info_hash(info: &Value) -> Result<String, TorrentError> {
     let result = hasher.finalize();
     Ok(hex::encode(result))
 }
+
 
 // Usage: your_bittorrent.sh decode "<encoded_value>"
 fn main() -> Result<(), TorrentError> {
