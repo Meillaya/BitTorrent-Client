@@ -151,7 +151,13 @@ fn calculate_info_hash(info: &Value) -> Result<String, TorrentError> {
     Ok(hex::encode(result))
 }
 
+fn discover_peers(torrent_file: &str) -> Result<(), TorrentError> {
 
+    
+
+
+    
+}
 // Usage: your_bittorrent.sh decode "<encoded_value>"
 fn main() -> Result<(), TorrentError> {
 
