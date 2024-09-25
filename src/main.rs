@@ -1,4 +1,4 @@
-use bittorrent_starter_rust::{bencode, error::{Result, TorrentError}, torrent, tracker};
+use bittorrent_starter_rust::{bencode, error::{Result, TorrentError}, torrent, tracker, peer};
 use serde_json::Value;
 use serde_bencode::value::Value as BencodeValue;
 use tracker::TrackerResponse;
@@ -46,6 +46,26 @@ fn main() -> Result<()> {
             for peer in tracker_response.peers.0 {
                 println!("{}", peer);
             }
+        },
+        "handshake" => {
+            if args.len() != 4 {
+                eprintln!("Usage: {} handshake <torrent_file> <peer>", args[0]);
+                std::process::exit(1);
+            }
+            let torrent_file = &args[2];
+            let peer_addr = &args[3];
+
+            let info = torrent::get_info(torrent_file)?;
+            let info_hash = hex::decode(&info.info_hash)
+                .map_err(|_| TorrentError::InvalidInfoHash)?;
+            let info_hash: [u8; 20] = info_hash.try_into()
+                .map_err(|_| TorrentError::InvalidInfoHash)?;
+
+            let peer_id = *b"00112233445566778899";
+            let mut peer = peer::Peer::new(peer_addr)?;
+            let received_peer_id = peer.handshake(&info_hash, &peer_id)?;
+
+            println!("Peer ID: {}", hex::encode(received_peer_id));
         },
         _ => {
             eprintln!("Unknown command: {}", command);
