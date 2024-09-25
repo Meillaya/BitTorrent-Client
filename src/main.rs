@@ -5,9 +5,9 @@ use tracker::TrackerResponse;
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     
-    if args.len() != 3 {
-        eprintln!("Usage: {} <command> <torrent_file>", args[0]);
-        eprintln!("Commands: decode, info, peers");
+    if args.len() < 2 {
+        eprintln!("Usage: {} <command> [<args>]", args[0]);
+        eprintln!("Commands: decode, info, peers, handshake");
         std::process::exit(1);
     }
     
@@ -67,6 +67,9 @@ fn main() -> Result<()> {
 
             println!("Peer ID: {}", hex::encode(received_peer_id));
         },
+        "download_piece" => {
+            if arg
+        }
         _ => {
             eprintln!("Unknown command: {}", command);
             std::process::exit(1);
