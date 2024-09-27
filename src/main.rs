@@ -1,4 +1,4 @@
-use bittorrent_starter_rust::{bencode, error::{Result, TorrentError}, torrent, tracker, peer};
+use bittorrent_starter_rust::{bencode, error::{Result, TorrentError}, torrent, tracker, peer, download};
 use serde_json::Value;
 use serde_bencode::value::Value as BencodeValue;
 use tracker::TrackerResponse;
@@ -68,7 +68,16 @@ fn main() -> Result<()> {
             println!("Peer ID: {}", hex::encode(received_peer_id));
         },
         "download_piece" => {
-            if arg
+            if args.len() != 6 {
+                eprint!("Usage: {} download_piece -o <output_file> <torrent_file> <piece_index>", args[0]);
+                std::process::exit(1);
+            }
+
+            let output_file = &args[3];
+            let torrent_file = &args[4];
+            let piece_index: usize = args[5].parse().expect("Invalid piece index");
+
+            download_piece(output_file, torrent_file, piece_index)?;
         }
         _ => {
             eprintln!("Unknown command: {}", command);
