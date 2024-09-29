@@ -68,8 +68,8 @@ impl Peer {
     fn try_handshake(&mut self, handshake: &[u8]) -> Result<[u8; 20]> {
         assert_eq!(handshake.len(), 68, "Handshake must be 68 bytes long");
     
-        self.stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-        self.stream.set_write_timeout(Some(Duration::from_secs(10)))?;  
+        self.stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+        self.stream.set_write_timeout(Some(Duration::from_secs(30)))?;  
     
         eprintln!("Sending handshake...");
         self.stream.write_all(handshake)

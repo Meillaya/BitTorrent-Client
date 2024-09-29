@@ -101,6 +101,16 @@ fn main() -> Result<()> {
             };
 
             download::download_piece(output_file, torrent_file, piece_index)?;
+        },
+        "download" => {
+            if args.len() != 5 || args[2] != "-o" {
+                eprintln!("Usage: {} download -o <output_file> <torrent_file>", args[0]);
+                std::process::exit(1);
+            }
+            let output_file = &args[3];
+            let torrent_file = &args[4];
+    
+            download::download_file(output_file, torrent_file)?;
         }
         _ => {
             eprintln!("Unknown command: {}", command);

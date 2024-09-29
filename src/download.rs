@@ -3,7 +3,61 @@
 use crate::{
     torrent, tracker, peer, error::{Result, TorrentError}
 };
+use std::io::Write;
 use std::fs;
+
+
+pub fn download_file(output_file: &str, torrent_file: &str) -> Result<()> {
+    let info = torrent::get_info(torrent_file)?;
+    let info_hash = hex::decode(&info.info_hash)
+        .map_err(|_| TorrentError::InvalidInfoHash)?;
+    let info_hash: [u8; 20] = info_hash.try_into()
+        .map_err(|_| TorrentError::InvalidInfoHash)?;
+
+    let tracker_response = tracker::TrackerResponse::query(&info, &info_hash)?;
+    if tracker_response.peers.0.is_empty() {
+        return Err(TorrentError::NoPeersAvailable);
+    }
+
+    let total_pieces = info.pieces.len();
+    let mut all_pieces = Vec::with_capacity(total_pieces);
+
+    for piece_index in 0..total_pieces {
+        let mut piece_downloaded = false;
+        for peer_addr in tracker_response.peers.0.iter().take(5) {
+            let peer_addr_str = peer_addr.to_string();
+            eprintln!("Attempting to download piece {} from peer: {}", piece_index, peer_addr_str);
+            match try_download_from_peer(&peer_addr_str, &info, &info_hash, piece_index) {
+                Ok(piece_data) => {
+                    if torrent::verify_piece(&info, piece_index, &piece_data) {
+                        all_pieces.push(piece_data);
+                        piece_downloaded = true;
+                        println!("Successfully downloaded piece {}", piece_index);
+                        break;
+                    } else {
+                        eprintln!("Piece {} failed verification from peer {}", piece_index, peer_addr_str);
+                    }
+                }
+                Err(e) => eprintln!("Failed to download piece {} from peer {}: {}", piece_index, peer_addr_str, e),
+            }
+        }
+        if !piece_downloaded {
+            return Err(TorrentError::DownloadFailed(format!("Failed to download piece {}", piece_index)));
+        }
+    }
+
+    // Combine all pieces into a single file
+    let mut file = fs::File::create(output_file)?;
+    for piece in all_pieces {
+        file.write_all(&piece)?;
+    }
+
+    println!("Successfully downloaded file to {}", output_file);
+    Ok(())
+}
+
+
+
 
 pub fn download_piece(output_file: &str, torrent_file: &str, piece_index: usize) -> Result<()> {
     let info = torrent::get_info(torrent_file)?;
@@ -76,7 +130,7 @@ fn download_piece_from_peer(
     let mut piece_data = Vec::with_capacity(piece_length);
     const BLOCK_SIZE: usize = 16 * 1024; // 16 KiB
 
-    let num_blocks = (piece_length + BLOCK_SIZE - 1) / BLOCK_SIZE; // Ceiling division
+    let num_blocks = (piece_length + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
     for block_index in 0..num_blocks {
         let begin = block_index * BLOCK_SIZE;
