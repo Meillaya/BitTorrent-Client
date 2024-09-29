@@ -28,6 +28,10 @@ pub enum TorrentError {
     PieceVerificationFailed,
     ConnectionFailed(String),
     DecodeError(String),
+    NoPeersAvailable,
+    UnexpectedMessage,
+    UnexpectedBlockData,
+    DownloadFailed(String),
 }
 
 impl fmt::Display for TorrentError {
@@ -49,6 +53,10 @@ impl fmt::Display for TorrentError {
             TorrentError::PieceVerificationFailed => write!(f, "Piece Verification Failed"),
             TorrentError::ConnectionFailed(msg) => write!(f, "Connection Failed: {}", msg),
             TorrentError::DecodeError(msg) => write!(f, "Decode Error: {}", msg),
+            TorrentError::NoPeersAvailable => write!(f, "No Peers Available"),
+            TorrentError::UnexpectedMessage => write!(f, "Unexpected Message"),
+            TorrentError::UnexpectedBlockData => write!(f, "Unexpected Block Data"),
+            TorrentError::DownloadFailed(msg) => write!(f, "Download Failed: {}", msg),
         }
     }
 }
@@ -100,5 +108,11 @@ impl From<url::ParseError> for TorrentError {
 impl From<serde_json::Error> for TorrentError {
     fn from(err: serde_json::Error) -> Self {
         TorrentError::Json(err)
+    }
+}
+
+impl From<std::array::TryFromSliceError> for TorrentError {
+    fn from(err: std::array::TryFromSliceError) -> Self {
+        TorrentError::DecodeError(err.to_string())
     }
 }
