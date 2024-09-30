@@ -1,7 +1,5 @@
-// main.rs
-
 use bittorrent_starter_rust::{
-    bencode, error::{Result, TorrentError}, torrent, tracker, peer, download
+    bencode, error::{Result, TorrentError}, torrent, tracker, peer, download, magnet
 };
 use serde_json::Value;
 use serde_bencode::value::Value as BencodeValue;
@@ -111,6 +109,20 @@ fn main() -> Result<()> {
             let torrent_file = &args[4];
     
             download::download_file(output_file, torrent_file)?;
+        },
+        "magnet_parse" => {
+            if args.len() != 3 {
+                eprintln!("Usage: {} magnet_parse <magnet-link>", args[0]);
+                std::process::exit(1);
+            }
+
+            let magnet_link = &args[2];
+            let parsed_magnet = magnet::Magnet::parse(&magnet_link)?;
+            if let Some(tracker_url) = parsed_magnet.tracker_url {
+                println!("Tracker URL: {}", tracker_url);
+            }
+            println!("Info Hash: {}", parsed_magnet.info_hash);
+
         }
         _ => {
             eprintln!("Unknown command: {}", command);

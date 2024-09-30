@@ -32,6 +32,7 @@ pub enum TorrentError {
     UnexpectedMessage,
     UnexpectedBlockData,
     DownloadFailed(String),
+    InvalidMagnetLink,
 }
 
 impl fmt::Display for TorrentError {
@@ -57,6 +58,7 @@ impl fmt::Display for TorrentError {
             TorrentError::UnexpectedMessage => write!(f, "Unexpected Message"),
             TorrentError::UnexpectedBlockData => write!(f, "Unexpected Block Data"),
             TorrentError::DownloadFailed(msg) => write!(f, "Download Failed: {}", msg),
+            TorrentError::InvalidMagnetLink => write!(f, "Invalid Magnet Link"),
         }
     }
 }
