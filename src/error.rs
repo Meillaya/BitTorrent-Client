@@ -5,7 +5,7 @@ use serde_bencode;
 use serde_json;
 use reqwest;
 use serde_urlencoded;
-
+use tokio::sync::broadcast::error::SendError;
 pub type Result<T> = std::result::Result<T, TorrentError>;
 
 #[derive(Debug)]
@@ -33,7 +33,9 @@ pub enum TorrentError {
     UnexpectedBlockData,
     DownloadFailed(String),
     InvalidMagnetLink,
+    ChannelSendError(String),
 }
+
 
 impl fmt::Display for TorrentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -59,6 +61,7 @@ impl fmt::Display for TorrentError {
             TorrentError::UnexpectedBlockData => write!(f, "Unexpected Block Data"),
             TorrentError::DownloadFailed(msg) => write!(f, "Download Failed: {}", msg),
             TorrentError::InvalidMagnetLink => write!(f, "Invalid Magnet Link"),
+            TorrentError::ChannelSendError(msg) => write!(f, "Channel Send Error: {}", msg),
         }
     }
 }
@@ -74,6 +77,12 @@ impl std::error::Error for TorrentError {
             TorrentError::Json(e) => Some(e),
             _ => None,
         }
+    }
+}
+
+impl From<SendError<usize>> for TorrentError {
+    fn from(err: SendError<usize>) -> Self {
+        TorrentError::ChannelSendError(format!("Failed to send piece index: {}", err))
     }
 }
 

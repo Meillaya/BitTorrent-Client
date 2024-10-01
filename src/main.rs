@@ -4,13 +4,18 @@ use bittorrent_starter_rust::{
 use serde_json::Value;
 use serde_bencode::value::Value as BencodeValue;
 use tracker::TrackerResponse;
+use torrent::TorrentInfo;
+use tokio;
 
-fn main() -> Result<()> {
+
+
+#[tokio::main]
+async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     
     if args.len() < 2 {
         eprintln!("Usage: {} <command> [<args>]", args[0]);
-        eprintln!("Commands: decode, info, peers, handshake, download_piece");
+        eprintln!("Commands: decode, info, peers, handshake, download_piece, download");
         std::process::exit(1);
     }
     
@@ -25,7 +30,7 @@ fn main() -> Result<()> {
             let bencoded_value = args[2].as_bytes();
             let decoded: BencodeValue = bencode::decode(bencoded_value)?;
             let json_value: Value = bencode_to_json(decoded);
-            println!("{}", serde_json::to_string(&json_value)?);
+            println!("{}", serde_json::to_string_pretty(&json_value)?);
         },
         "info" => {
             if args.len() != 3 {
@@ -38,10 +43,7 @@ fn main() -> Result<()> {
             println!("Length: {}", info.length);
             println!("Info Hash: {}", info.info_hash);
             println!("Piece Length: {}", info.piece_length);
-            println!("Piece Hashes:");
-            for (index, hash) in info.pieces.iter().enumerate() {
-                println!("{}: {}", index, hex::encode(hash));
-            }
+            println!("Number of Pieces: {}", info.pieces.len());
         },
         "peers" => {
             if args.len() != 3 {
@@ -54,7 +56,7 @@ fn main() -> Result<()> {
                 .map_err(|_| TorrentError::InvalidInfoHash)?;
             let info_hash: [u8; 20] = info_hash.try_into()
                 .map_err(|_| TorrentError::InvalidInfoHash)?;
-            let tracker_response = TrackerResponse::query(&info, &info_hash)?;
+            let tracker_response = TrackerResponse::query(&info, &info_hash).await?;
             for peer in tracker_response.peers.0 {
                 println!("{}", peer);
             }
@@ -73,9 +75,9 @@ fn main() -> Result<()> {
             let info_hash: [u8; 20] = info_hash.try_into()
                 .map_err(|_| TorrentError::InvalidInfoHash)?;
 
-            let peer_id: [u8; 20] = *b"00112233445566778899"; // Ensure it's a [u8; 20]
-            let mut peer = peer::Peer::new(peer_addr)?;
-            let received_peer_id = peer.handshake(&info_hash, &peer_id)?;
+            let peer_id: [u8; 20] = *b"00112233445566778899"; // Consider generating a unique peer ID
+            let mut peer = peer::Peer::new(peer_addr).await?;
+            let received_peer_id = peer.handshake(&info_hash, &peer_id).await?;
 
             println!("Peer ID: {}", hex::encode(received_peer_id));
         },
@@ -98,7 +100,7 @@ fn main() -> Result<()> {
                 }
             };
 
-            download::download_piece(output_file, torrent_file, piece_index)?;
+            download::download_piece(output_file, torrent_file, piece_index).await?;
         },
         "download" => {
             if args.len() != 5 || args[2] != "-o" {
@@ -107,8 +109,9 @@ fn main() -> Result<()> {
             }
             let output_file = &args[3];
             let torrent_file = &args[4];
-    
-            download::download_file(output_file, torrent_file)?;
+
+           
+            download::download_file(output_file, torrent_file).await?;
         },
         "magnet_parse" => {
             if args.len() != 3 {
@@ -122,15 +125,51 @@ fn main() -> Result<()> {
                 println!("Tracker URL: {}", tracker_url);
             }
             println!("Info Hash: {}", parsed_magnet.info_hash);
+        },
+        "magnet_handshake" => {
+            if args.len() != 3 {
+                eprintln!("Usage: {} magnet_handshake <magnet-link>", args[0]);
+                std::process::exit(1);
+            }
 
+            let magnet_link = &args[2];
+            magnet_handshake(magnet_link).await?;
         }
         _ => {
             eprintln!("Unknown command: {}", command);
-            eprintln!("Commands: decode, info, peers, handshake, download_piece");
+            eprintln!("Commands: decode, info, peers, handshake, download_piece, download");
             std::process::exit(1);
         }
     }
     
+    Ok(())
+}
+
+async fn magnet_handshake(magnet_link: &str) -> Result<()> {
+
+    let parsed_magnet = magnet::Magnet::parse(magnet_link)?;
+    let info_hash = hex::decode(&parsed_magnet.info_hash)
+        .map_err(|_| TorrentError::InvalidInfoHash)?;
+    let info_hash: [u8; 20] = info_hash.try_into()
+        .map_err(|_| TorrentError::InvalidInfoHash)?;
+    
+
+    let torrent_info = TorrentInfo::from_magnet(&parsed_magnet)?;
+    let tracker_response =
+        TrackerResponse::query_with_url(&torrent_info, &info_hash).await?;
+
+
+    if tracker_response.peers.0.is_empty() {
+        return Err(TorrentError::NoPeersAvailable);
+    }
+
+    let peer_addr = &tracker_response.peers.0[0].to_string();
+    let mut peer = peer::Peer::new(peer_addr).await?;
+    
+    let received_peer_id = peer.magnet_handshake(magnet_link).await?;
+
+    println!("Peer ID: {}", hex::encode(received_peer_id));
+
     Ok(())
 }
 

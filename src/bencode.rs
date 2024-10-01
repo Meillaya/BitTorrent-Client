@@ -1,3 +1,5 @@
+// bencode.rs
+
 use crate::error::{Result, TorrentError};
 use serde_bencode::value::Value;
 use std::collections::HashMap;
@@ -76,6 +78,7 @@ pub fn encode_list(list: &[Value]) -> Result<Vec<u8>> {
 pub fn encode_dict(dict: &HashMap<Vec<u8>, Value>) -> Result<Vec<u8>> {
     encode(&Value::Dict(dict.clone()))
 }
+
 
 // Helper functions for working with dictionaries
 // pub fn get_bytes_from_dict(dict: &HashMap<Vec<u8>, Value>, key: &[u8]) -> Result<Vec<u8>> {

@@ -1,3 +1,5 @@
+// magnet.rs
+
 use crate::error::{Result, TorrentError};
 use url::Url;
 
@@ -10,7 +12,7 @@ pub struct Magnet {
 impl Magnet {
     pub fn parse(link: &str) -> Result<Self> {
         let url = Url::parse(link)
-            .map_err(|_|TorrentError::InvalidMagnetLink)?;
+            .map_err(|_| TorrentError::InvalidMagnetLink)?;
 
         if url.scheme() != "magnet" {
             return Err(TorrentError::InvalidMagnetLink)
@@ -40,6 +42,5 @@ impl Magnet {
             tracker_url,
             display_name,
         })
-
     }
 }
