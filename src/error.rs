@@ -34,6 +34,11 @@ pub enum TorrentError {
     DownloadFailed(String),
     InvalidMagnetLink,
     ChannelSendError(String),
+    MetadataExtensionNotSupported,
+    InvalidMetadataResponse,
+    MetadataSizeNotFound,
+    MetadataRejected,
+    IncompleteMetadata,
 }
 
 
@@ -62,6 +67,11 @@ impl fmt::Display for TorrentError {
             TorrentError::DownloadFailed(msg) => write!(f, "Download Failed: {}", msg),
             TorrentError::InvalidMagnetLink => write!(f, "Invalid Magnet Link"),
             TorrentError::ChannelSendError(msg) => write!(f, "Channel Send Error: {}", msg),
+            TorrentError::MetadataExtensionNotSupported => write!(f, "Metadata Extension Not Supported"),
+            TorrentError::InvalidMetadataResponse => write!(f, "Invalid Metadata Response"),
+            TorrentError::MetadataSizeNotFound => write!(f, "Metadata Size Not Found"),
+            TorrentError::MetadataRejected => write!(f, "Metadata Rejected"),
+            TorrentError::IncompleteMetadata=> write!(f, "Incomplete Metadata"),
         }
     }
 }

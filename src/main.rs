@@ -1,6 +1,7 @@
 use bittorrent_starter_rust::{
     bencode, error::{Result, TorrentError}, torrent, tracker, peer, download, magnet
 };
+use rand::Rng as _;
 use serde_json::Value;
 use serde_bencode::value::Value as BencodeValue;
 use tracker::TrackerResponse;
@@ -30,7 +31,8 @@ async fn main() -> Result<()> {
             let bencoded_value = args[2].as_bytes();
             let decoded: BencodeValue = bencode::decode(bencoded_value)?;
             let json_value: Value = bencode_to_json(decoded);
-            println!("{}", serde_json::to_string_pretty(&json_value)?);
+            println!("{}", serde_json::to_string(&json_value)?);
+
         },
         "info" => {
             if args.len() != 3 {
@@ -44,6 +46,11 @@ async fn main() -> Result<()> {
             println!("Info Hash: {}", info.info_hash);
             println!("Piece Length: {}", info.piece_length);
             println!("Number of Pieces: {}", info.pieces.len());
+
+            println!("Piece Hashes:");
+            for (i, piece) in info.pieces.iter().enumerate() {
+                println!("{}: {}", i, hex::encode(piece));
+            }
         },
         "peers" => {
             if args.len() != 3 {
@@ -75,7 +82,7 @@ async fn main() -> Result<()> {
             let info_hash: [u8; 20] = info_hash.try_into()
                 .map_err(|_| TorrentError::InvalidInfoHash)?;
 
-            let peer_id: [u8; 20] = *b"00112233445566778899"; // Consider generating a unique peer ID
+            let peer_id: [u8; 20] = generate_peer_id();
             let mut peer = peer::Peer::new(peer_addr).await?;
             let received_peer_id = peer.handshake(&info_hash, &peer_id).await?;
 
@@ -134,7 +141,16 @@ async fn main() -> Result<()> {
 
             let magnet_link = &args[2];
             magnet_handshake(magnet_link).await?;
-        }
+        },
+        "magnet_info" => {
+            if args.len() != 3 {
+                eprintln!("Usage: {} magnet_info <magnet-link>", args[0]);
+                std::process::exit(1);
+            }
+    
+            let magnet_link = &args[2];
+            magnet_info(magnet_link).await?;
+        },
         _ => {
             eprintln!("Unknown command: {}", command);
             eprintln!("Commands: decode, info, peers, handshake, download_piece, download");
@@ -142,6 +158,65 @@ async fn main() -> Result<()> {
         }
     }
     
+    Ok(())
+}
+
+fn generate_peer_id() -> [u8; 20] {
+    let prefix = b"-TR3000-"; // Example prefix indicating the client and version
+    let mut peer_id = [0u8; 20];
+    peer_id[..8].copy_from_slice(prefix);
+    let rand_chars: Vec<u8> = (0..12).map(|_| {
+        let chars = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        let idx = rand::thread_rng().gen_range(0..chars.len());
+        chars[idx]
+    }).collect();
+    peer_id[8..20].copy_from_slice(&rand_chars);
+    peer_id
+}
+
+async fn magnet_info(magnet_link: &str) -> Result<()> {
+    let parsed_magnet = magnet::Magnet::parse(magnet_link)?;
+    let info_hash = hex::decode(&parsed_magnet.info_hash)
+        .map_err(|_| TorrentError::InvalidInfoHash)?;
+    let info_hash: [u8; 20] = info_hash.try_into()
+        .map_err(|_| TorrentError::InvalidInfoHash)?;
+    let peer_id: [u8; 20] = generate_peer_id();
+
+    let torrent_info = TorrentInfo::from_magnet(&parsed_magnet)?;
+    let tracker_response =
+        TrackerResponse::query_with_url(&torrent_info, &info_hash).await?;
+
+    if tracker_response.peers.0.is_empty() {
+        return Err(TorrentError::NoPeersAvailable);
+    }
+
+    let peer_addr = &tracker_response.peers.0[0].to_string();
+    let mut peer = peer::Peer::new(peer_addr).await?;
+    let received_peer_id = peer.magnet_handshake(magnet_link).await?;
+
+    println!("Peer ID: {}", hex::encode(received_peer_id));
+
+    // Print metadata information
+    let metadata = peer.receive_metadata().await?;
+    let info_dict: serde_bencode::value::Value = serde_bencode::from_bytes(&metadata)?;
+    if let serde_bencode::value::Value::Dict(dict) = info_dict {
+        if let Some(serde_bencode::value::Value::Bytes(name)) = dict.get(&b"name"[..]) {
+            println!("Name: {}", String::from_utf8_lossy(name));
+        }
+        if let Some(serde_bencode::value::Value::Int(length)) = dict.get(&b"length"[..]) {
+            println!("Length: {}", length);
+        }
+        if let Some(serde_bencode::value::Value::Int(piece_length)) = dict.get(&b"piece length"[..]) {
+            println!("Piece Length: {}", piece_length);
+        }
+        if let Some(serde_bencode::value::Value::Bytes(pieces)) = dict.get(&b"pieces"[..]) {
+            println!("Piece Hashes:");
+            for chunk in pieces.chunks(20) {
+                println!("{}", hex::encode(chunk));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -165,7 +240,7 @@ async fn magnet_handshake(magnet_link: &str) -> Result<()> {
 
     let peer_addr = &tracker_response.peers.0[0].to_string();
     let mut peer = peer::Peer::new(peer_addr).await?;
-    
+
     let received_peer_id = peer.magnet_handshake(magnet_link).await?;
 
     println!("Peer ID: {}", hex::encode(received_peer_id));

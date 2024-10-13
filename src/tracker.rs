@@ -1,5 +1,6 @@
 // tracker.rs
 
+use rand::Rng;
 use crate::error::{Result, TorrentError};
 use crate::torrent::TorrentInfo;
 use serde::{Deserialize, Serialize};
@@ -10,16 +11,37 @@ use reqwest::Client;
 
 pub use peers::Peers;
 
-const PEER_ID: &str = "00112233445566778899";
 
+
+fn generate_peer_id() -> [u8; 20] {
+    let prefix = b"-TR3000-"; // Example prefix indicating the client and version
+    let mut peer_id = [0u8; 20];
+    peer_id[..8].copy_from_slice(prefix);
+    let rand_chars: Vec<u8> = (0..12).map(|_| {
+        let chars = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        let idx = rand::thread_rng().gen_range(0..chars.len());
+        chars[idx]
+    }).collect();
+    peer_id[8..20].copy_from_slice(&rand_chars);
+    peer_id
+}
 #[derive(Debug, Clone, Serialize)]
 pub struct TrackerRequest {
-    pub peer_id: String,
+    #[serde(serialize_with = "serialize_peer_id")]
+    pub peer_id: [u8; 20],
     pub port: u16,
     pub uploaded: usize,
     pub downloaded: usize,
     pub left: usize,
     pub compact: u8,
+}
+
+fn serialize_peer_id<S>(peer_id: &[u8; 20], serializer: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let peer_id_str = String::from_utf8_lossy(peer_id).into_owned();
+    serializer.serialize_str(&peer_id_str)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -33,7 +55,7 @@ impl TrackerResponse {
     pub async fn query(t: &TorrentInfo, info_hash: &[u8; 20]) -> Result<Self> {
         let client = Client::new();
         let request = TrackerRequest {
-            peer_id: PEER_ID.to_string(),
+            peer_id: generate_peer_id(),
             port: 6881,
             uploaded: 0,
             downloaded: 0,
@@ -62,7 +84,7 @@ impl TrackerResponse {
     pub async fn query_with_url(t: &TorrentInfo, info_hash: &[u8; 20]) -> Result<Self> {
         let client = Client::new();
         let request = TrackerRequest {
-            peer_id: PEER_ID.to_string(),
+            peer_id: generate_peer_id(),
             port: 6881,
             uploaded: 0,
             downloaded: 0,
