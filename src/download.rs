@@ -1,9 +1,9 @@
 // download.rs
 
 use crate::{
-    torrent, tracker, peer, error::{Result, TorrentError}
+    error::{Result, TorrentError}, magnet, peer, torrent::{self, TorrentInfo}, tracker::{self, TrackerResponse}
 };
-use tokio::fs::File;
+use tokio::{fs::File, time::timeout};
 use tokio::io::AsyncWriteExt;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
@@ -19,24 +19,96 @@ const WORKER_COUNT: usize = 10;
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 // const ENDGAME_THRESHOLD: usize = 5;
 
-/// Downloads the entire file from the torrent.
-pub async fn download_file(output_file: &str, torrent_file: &str) -> Result<()> {
-    let info = torrent::get_info(torrent_file)?;
-    let info_hash = hex::decode(&info.info_hash)
-        .map_err(|_| TorrentError::InvalidInfoHash)?;
-    let info_hash: [u8; 20] = info_hash.try_into()
-        .map_err(|_| TorrentError::InvalidInfoHash)?;
 
-    let tracker_response = tracker::TrackerResponse::query(&info, &info_hash).await?;
+async fn retrieve_torrent_info_from_magnet(
+    parsed_magnet: &magnet::Magnet,
+    info_hash: &[u8; 20],
+) -> Result<(TorrentInfo, Vec<std::net::SocketAddrV4>)> {
+    // Perform a tracker request to get a list of peers
+    let torrent_info = TorrentInfo::from_magnet(&parsed_magnet)?;
+    let tracker_response = TrackerResponse::query_with_url(&torrent_info, &info_hash).await?;
+
     if tracker_response.peers.0.is_empty() {
         return Err(TorrentError::NoPeersAvailable);
     }
 
+    // Try to get metadata from each peer until successful
+    for peer_addr in &tracker_response.peers.0 {
+        let peer_addr_str = peer_addr.to_string();
+        match get_metadata_from_peer(&peer_addr_str, info_hash).await {
+            Ok(validated_info) => {
+                // Successfully retrieved and validated metadata
+                return Ok((validated_info, tracker_response.peers.0.clone()));
+            }
+            Err(e) => {
+                eprintln!("Failed to get metadata from peer {}: {}", peer_addr, e);
+                continue; // Try the next peer
+            }
+        }
+    }
+
+    Err(TorrentError::NoPeersAvailable)
+}
+
+async fn get_metadata_from_peer(
+    peer_addr: &str,
+    info_hash: &[u8; 20],
+) -> Result<TorrentInfo> {
+    let peer_id: [u8; 20] = generate_peer_id();
+    let mut peer = peer::Peer::new(peer_addr).await?;
+
+    // Enable TCP_NODELAY
+    peer.enable_tcp_nodelay().await?;
+
+    // Perform handshake
+    peer.handshake(info_hash, &peer_id).await?;
+    // Request metadata
+    peer.send_metadata_request().await?;
+    let metadata = peer.receive_metadata().await?;
+
+    // Validate and parse the metadata
+    let info_hash_hex = hex::encode(info_hash);
+    let validated_info = TorrentInfo::validate_metadata(&metadata, &info_hash_hex)?;
+
+    Ok(validated_info)
+}
+/// Downloads the entire file from the torrent.
+pub async fn download_file(output_file: &str, source: &str) -> Result<()> {
+    // Determine if source is a magnet link or a torrent file
+    let (info, info_hash, peers, is_magnet) = if source.starts_with("magnet:?") {
+        // Handle magnet link
+        let parsed_magnet = magnet::Magnet::parse(source)?;
+        let info_hash_vec = hex::decode(&parsed_magnet.info_hash)
+            .map_err(|_| TorrentError::InvalidInfoHash)?;
+        let info_hash_array: [u8; 20] = info_hash_vec.clone().try_into()
+            .map_err(|_| TorrentError::InvalidInfoHash)?;
+
+        // Retrieve the TorrentInfo and peers
+        let (info, peers) = retrieve_torrent_info_from_magnet(&parsed_magnet, &info_hash_array).await?;
+        (info, info_hash_array, peers, true)
+    } else {
+        // Handle torrent file
+        let info = torrent::get_info(source)?;
+        let info_hash_vec = hex::decode(&info.info_hash)
+            .map_err(|_| TorrentError::InvalidInfoHash)?;
+        let info_hash_array: [u8; 20] = info_hash_vec.try_into()
+            .map_err(|_| TorrentError::InvalidInfoHash)?;
+
+        let tracker_response = tracker::TrackerResponse::query(&info, &info_hash_array).await?;
+        if tracker_response.peers.0.is_empty() {
+            return Err(TorrentError::NoPeersAvailable);
+        }
+        let peers = tracker_response.peers.0.clone();
+        
+        (info, info_hash_array, peers, false)
+    };
+
+    
     // Initialize piece availability map for "rarest first" strategy
     let mut piece_availability: Vec<usize> = vec![0; info.pieces.len()];
     // TODO: Fetch each peer's bitfield to accurately populate piece_availability
     // For simplicity, we'll assume all peers have all pieces 
-    for _peer in &tracker_response.peers.0 {
+    for _peer in &peers {
         for piece in 0..info.pieces.len() {
             piece_availability[piece] += 1;
         }
@@ -57,9 +129,9 @@ pub async fn download_file(output_file: &str, torrent_file: &str) -> Result<()> 
         let all_pieces = Arc::clone(&all_pieces);
         let info = info.clone();
         let info_hash = info_hash.clone();
-        let peers = tracker_response.peers.0.clone();
         let semaphore = Arc::clone(&semaphore);
-
+        let peers = peers.clone();
+        
         join_set.spawn(async move {
             loop {
                 // Acquire a permit before proceeding
@@ -92,7 +164,7 @@ pub async fn download_file(output_file: &str, torrent_file: &str) -> Result<()> 
                 let mut success = false;
                 while attempts < MAX_RETRIES && !success {
                     let peer = select_peer(&peers).await;
-                    match try_download_piece(&peer, &info, &info_hash, piece_index).await {
+                    match try_download_piece(&peer, &info, &info_hash, piece_index, is_magnet).await {
                         Ok(piece_data) => {
                             if torrent::verify_piece(&info, piece_index, &piece_data) {
                                 let mut all = all_pieces.lock().await;
@@ -145,20 +217,38 @@ pub async fn download_file(output_file: &str, torrent_file: &str) -> Result<()> 
     println!("Successfully downloaded file to {}", output_file);
     Ok(())
 }
-
 /// Downloads a specific piece from the torrent.
-pub async fn download_piece(output_file: &str, torrent_file: &str, piece_index: usize) -> Result<()> {
-    let info = torrent::get_info(torrent_file)?;
-    let info_hash = hex::decode(&info.info_hash)
-        .map_err(|_| TorrentError::InvalidInfoHash)?;
-    let info_hash: [u8; 20] = info_hash.try_into()
-        .map_err(|_| TorrentError::InvalidInfoHash)?;
+pub async fn download_piece(output_file: &str, source: &str, piece_index: usize) -> Result<()> {
+    // Determine if source is a magnet link or a torrent file
+    let (info, info_hash, peers, is_magnet) = if source.starts_with("magnet:?") {
+        // Handle magnet link
+        let parsed_magnet = magnet::Magnet::parse(source)?;
+        let info_hash_vec = hex::decode(&parsed_magnet.info_hash)
+            .map_err(|_| TorrentError::InvalidInfoHash)?;
+        let info_hash_array: [u8; 20] = info_hash_vec.clone().try_into()
+            .map_err(|_| TorrentError::InvalidInfoHash)?;
 
-    let tracker_response = tracker::TrackerResponse::query(&info, &info_hash).await?;
-    if tracker_response.peers.0.is_empty() {
-        return Err(TorrentError::NoPeersAvailable);
-    }
+        // Retrieve the TorrentInfo and peers
+        let (info, peers) = retrieve_torrent_info_from_magnet(&parsed_magnet, &info_hash_array).await?;
+        (info, info_hash_array, peers, true)
+    } else {
+        // Handle torrent file
+        let info = torrent::get_info(source)?;
+        let info_hash_vec = hex::decode(&info.info_hash)
+            .map_err(|_| TorrentError::InvalidInfoHash)?;
+        let info_hash_array: [u8; 20] = info_hash_vec.try_into()
+            .map_err(|_| TorrentError::InvalidInfoHash)?;
 
+        let tracker_response = tracker::TrackerResponse::query(&info, &info_hash_array).await?;
+        if tracker_response.peers.0.is_empty() {
+            return Err(TorrentError::NoPeersAvailable);
+        }
+        let peers = tracker_response.peers.0.clone();
+
+        (info, info_hash_array, peers, false)
+    };
+
+    
     let all_pieces = Arc::new(Mutex::new(vec![None; info.pieces.len()]));
     let semaphore = Arc::new(Semaphore::new(1)); // Single worker for single piece
     let mut join_set = JoinSet::new();
@@ -170,8 +260,8 @@ pub async fn download_piece(output_file: &str, torrent_file: &str, piece_index: 
         let all_pieces = Arc::clone(&all_pieces);
         let info = info.clone();
         let info_hash = info_hash.clone();
-        let peers = tracker_response.peers.0.clone();
         let semaphore = Arc::clone(&semaphore);
+        let peers = peers.clone();
 
         join_set.spawn(async move {
             loop {
@@ -201,11 +291,12 @@ pub async fn download_piece(output_file: &str, torrent_file: &str, piece_index: 
                 };
 
                 // Download the piece with retry logic
+                
                 let mut attempts = 0;
                 let mut success = false;
                 while attempts < MAX_RETRIES && !success {
                     let peer = select_peer(&peers).await;
-                    match try_download_piece(&peer, &info, &info_hash, piece_index).await {
+                    match try_download_piece(&peer, &info, &info_hash, piece_index, is_magnet).await {
                         Ok(piece_data) => {
                             if torrent::verify_piece(&info, piece_index, &piece_data) {
                                 let mut all = all_pieces.lock().await;
@@ -251,51 +342,85 @@ pub async fn download_piece(output_file: &str, torrent_file: &str, piece_index: 
         Err(TorrentError::DownloadFailed(format!("Failed to download piece {}", piece_index)))
     }
 }
-
 /// Attempts to download a specific piece from a given peer.
 /// Returns the piece data if successful.
-async fn try_download_piece(peer_addr: &str, info: &torrent::TorrentInfo, info_hash: &[u8; 20], piece_index: usize) -> Result<Vec<u8>> {
+async fn try_download_piece(peer_addr: &str, info: &torrent::TorrentInfo, info_hash: &[u8; 20], piece_index: usize, is_magnet: bool) -> Result<Vec<u8>> {
     let peer_id: [u8; 20] = generate_peer_id();
     let mut peer = peer::Peer::new(peer_addr).await?;
     
     peer.enable_tcp_nodelay().await?;
     peer.handshake(info_hash, &peer_id).await?;
     
-    let piece_data = download_piece_from_peer(&mut peer, info, piece_index).await?;
+    let piece_data = download_piece_from_peer(&mut peer, info, piece_index, is_magnet).await?;
     
     Ok(piece_data)
 }
 
 /// Handles the actual download of a piece from the connected peer.
-async fn download_piece_from_peer(peer: &mut peer::Peer, info: &torrent::TorrentInfo, piece_index: usize) -> Result<Vec<u8>> {
-    peer.receive_bitfield().await?;
-    peer.send_interested().await?;
-    peer.receive_unchoke().await?;
+async fn download_piece_from_peer(peer: &mut peer::Peer, info: &torrent::TorrentInfo, piece_index: usize, is_magnet: bool) -> Result<Vec<u8>> {
+    const BLOCK_SIZE: usize = 1 << 14; // 16 KiB
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+    const MAX_RETRIES: usize = 3;
 
     let piece_length = if piece_index == info.pieces.len() - 1 {
-        // For the last piece, calculate the correct length
         info.length as usize - (info.pieces.len() - 1) * (info.piece_length as usize)
     } else {
         info.piece_length as usize
     };
-    
+   
     let mut piece_data = Vec::with_capacity(piece_length);
-    const BLOCK_SIZE: usize = 1 << 14; // 16 KiB
-
     let num_blocks = (piece_length + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    if is_magnet {
+
+        peer.send_interested().await?;
+
+        peer.receive_unchoke().await?;
+    } else {
+        peer.receive_bitfield().await?;
+
+        peer.send_interested().await?;
+    
+        peer.receive_unchoke().await?;
+    }
+
 
     for block_index in 0..num_blocks {
         let begin = block_index * BLOCK_SIZE;
         let length = std::cmp::min(BLOCK_SIZE, piece_length - begin);
 
-        peer.request_block(piece_index, begin, length).await?;
-        let block = peer.receive_block(piece_index, begin).await?;
-
-        if block.len() != length {
-            return Err(TorrentError::UnexpectedBlockData);
+        for retry in 0..MAX_RETRIES {
+            peer.request_block(piece_index, begin, length).await?;
+           
+            match timeout(REQUEST_TIMEOUT, peer.receive_block(piece_index, begin)).await {
+                Ok(Ok(block)) => {
+                    if block.len() != length {
+                        return Err(TorrentError::UnexpectedBlockData);
+                    }
+                    piece_data.extend_from_slice(&block);
+                    break;
+                }
+                Ok(Err(TorrentError::UnexpectedMessage(msg))) => {
+                    eprintln!("Unexpected message received: {:?}", msg);
+                    eprintln!("Error receiving block: Unexpected message. Retry {}/{}", retry + 1, MAX_RETRIES);
+                    if retry == MAX_RETRIES - 1 {
+                        return Err(TorrentError::UnexpectedMessage(msg));
+                    }
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Error receiving block: {:?}. Retry {}/{}", e, retry + 1, MAX_RETRIES);
+                    if retry == MAX_RETRIES - 1 {
+                        return Err(e);
+                    }
+                }
+                Err(_) => {
+                    eprintln!("Timeout receiving block. Retry {}/{}", retry + 1, MAX_RETRIES);
+                    if retry == MAX_RETRIES - 1 {
+                        return Err(TorrentError::ConnectionTimeout);
+                    }
+                }
+            }
         }
-
-        piece_data.extend_from_slice(&block);
     }
 
     if piece_data.len() != piece_length {

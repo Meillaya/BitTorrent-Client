@@ -93,24 +93,35 @@ impl TrackerResponse {
         };
 
         let url_params = serde_urlencoded::to_string(&request)
-            .map_err(|e| TorrentError::InvalidResponseFormat(format!("Failed to serialize request: {}", e)))?;
+        .map_err(|e| TorrentError::InvalidResponseFormat(format!("Failed to serialize request: {}", e)))?;
 
         let info_hash_encoded = url_encode(info_hash);
-        let url = format!(
+        let mut url = t.announce.clone();
+        
+        // Check if the URL is relative and prepend a default base if necessary
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            url = format!("http://{}", url);
+        }
+        
+        let full_url = format!(
             "{}?{}&info_hash={}",
-            t.announce,
+            url,
             url_params,
             info_hash_encoded
         );
 
-        let response = make_tracker_request(&client, &url).await?;
+        println!("Tracker URL: {}", url);  // Print the URL before sending the request
+
+        let response = make_tracker_request(&client, &full_url).await?;
+
+
 
         let tracker_info: TrackerResponse = from_bytes(&response)
             .map_err(|e| TorrentError::InvalidResponseFormat(format!("Failed to deserialize tracker response: {}", e)))?;
 
         Ok(tracker_info)
-    }
-}
+
+    }}
 
 fn url_encode(t: &[u8; 20]) -> String {
     let mut encoded = String::with_capacity(3 * t.len());
@@ -122,6 +133,8 @@ fn url_encode(t: &[u8; 20]) -> String {
 }
 
 async fn make_tracker_request(client: &Client, url: &str) -> Result<Vec<u8>> {
+
+    println!("Tracker URL: {}", url); 
     let response = client.get(url).send().await
         .map_err(|e| TorrentError::Tracker(format!("Failed to send request to tracker: {}", e)))?;
 

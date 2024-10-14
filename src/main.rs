@@ -151,6 +151,25 @@ async fn main() -> Result<()> {
             let magnet_link = &args[2];
             magnet_info(magnet_link).await?;
         },
+        "magnet_download_piece" => {
+            if args.len() != 6 || args[2] != "-o" {
+                eprintln!("Usage: {} magnet_download_piece -o <output_file> <magnet-link> <piece_index>", args[0]);
+                std::process::exit(1);
+            }
+            let output_file = &args[3];
+            let magnet_link = &args[4];
+            let piece_index: usize = args[5].parse().expect("Invalid piece index");
+            download::download_piece(output_file, magnet_link, piece_index).await?;
+        },
+        "magnet_download" => {
+            if args.len() != 5 || args[2] != "-o" {
+                eprintln!("Usage: {} magnet_download -o <output_file> <magnet-link>", args[0]);
+                std::process::exit(1);
+            }
+            let output_file = &args[3];
+            let magnet_link = &args[4];
+            download::download_file(output_file, magnet_link).await?;
+        },
         _ => {
             eprintln!("Unknown command: {}", command);
             eprintln!("Commands: decode, info, peers, handshake, download_piece, download");
@@ -183,8 +202,7 @@ async fn magnet_info(magnet_link: &str) -> Result<()> {
     let peer_id: [u8; 20] = generate_peer_id();
 
     let torrent_info = TorrentInfo::from_magnet(&parsed_magnet)?;
-    let tracker_response =
-        TrackerResponse::query_with_url(&torrent_info, &info_hash).await?;
+    let tracker_response = TrackerResponse::query_with_url(&torrent_info, &info_hash).await?;
 
     if tracker_response.peers.0.is_empty() {
         return Err(TorrentError::NoPeersAvailable);
@@ -192,29 +210,23 @@ async fn magnet_info(magnet_link: &str) -> Result<()> {
 
     let peer_addr = &tracker_response.peers.0[0].to_string();
     let mut peer = peer::Peer::new(peer_addr).await?;
-    let received_peer_id = peer.magnet_handshake(magnet_link).await?;
 
-    println!("Peer ID: {}", hex::encode(received_peer_id));
-
-    // Print metadata information
+    peer.handshake(&info_hash, &peer_id).await?;
+    // Request metadata
+    peer.send_metadata_request().await?;
     let metadata = peer.receive_metadata().await?;
-    let info_dict: serde_bencode::value::Value = serde_bencode::from_bytes(&metadata)?;
-    if let serde_bencode::value::Value::Dict(dict) = info_dict {
-        if let Some(serde_bencode::value::Value::Bytes(name)) = dict.get(&b"name"[..]) {
-            println!("Name: {}", String::from_utf8_lossy(name));
-        }
-        if let Some(serde_bencode::value::Value::Int(length)) = dict.get(&b"length"[..]) {
-            println!("Length: {}", length);
-        }
-        if let Some(serde_bencode::value::Value::Int(piece_length)) = dict.get(&b"piece length"[..]) {
-            println!("Piece Length: {}", piece_length);
-        }
-        if let Some(serde_bencode::value::Value::Bytes(pieces)) = dict.get(&b"pieces"[..]) {
-            println!("Piece Hashes:");
-            for chunk in pieces.chunks(20) {
-                println!("{}", hex::encode(chunk));
-            }
-        }
+    
+
+    // Validate and display the received metadata
+    let validated_info = TorrentInfo::validate_metadata(&metadata, &parsed_magnet.info_hash)?;
+
+    println!("Tracker URL: {}", parsed_magnet.tracker_url.unwrap_or_default());
+    println!("Length: {}", validated_info.length);
+    println!("Info Hash: {}", validated_info.info_hash);
+    println!("Piece Length: {}", validated_info.piece_length);
+    println!("Piece Hashes:");
+    for piece_hash in &validated_info.pieces {
+        println!("{}", hex::encode(piece_hash));
     }
 
     Ok(())

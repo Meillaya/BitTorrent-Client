@@ -29,7 +29,7 @@ pub enum TorrentError {
     ConnectionFailed(String),
     DecodeError(String),
     NoPeersAvailable,
-    UnexpectedMessage,
+    UnexpectedMessage(String),
     UnexpectedBlockData,
     DownloadFailed(String),
     InvalidMagnetLink,
@@ -39,6 +39,8 @@ pub enum TorrentError {
     MetadataSizeNotFound,
     MetadataRejected,
     IncompleteMetadata,
+    ConnectionClosed,
+    ConnectionTimeout,
 }
 
 
@@ -62,7 +64,7 @@ impl fmt::Display for TorrentError {
             TorrentError::ConnectionFailed(msg) => write!(f, "Connection Failed: {}", msg),
             TorrentError::DecodeError(msg) => write!(f, "Decode Error: {}", msg),
             TorrentError::NoPeersAvailable => write!(f, "No Peers Available"),
-            TorrentError::UnexpectedMessage => write!(f, "Unexpected Message"),
+            TorrentError::UnexpectedMessage(msg) => write!(f, "Unexpected Message: {}", msg),
             TorrentError::UnexpectedBlockData => write!(f, "Unexpected Block Data"),
             TorrentError::DownloadFailed(msg) => write!(f, "Download Failed: {}", msg),
             TorrentError::InvalidMagnetLink => write!(f, "Invalid Magnet Link"),
@@ -72,6 +74,8 @@ impl fmt::Display for TorrentError {
             TorrentError::MetadataSizeNotFound => write!(f, "Metadata Size Not Found"),
             TorrentError::MetadataRejected => write!(f, "Metadata Rejected"),
             TorrentError::IncompleteMetadata=> write!(f, "Incomplete Metadata"),
+            TorrentError::ConnectionClosed=> write!(f, "Connection Closed"),
+            TorrentError::ConnectionTimeout=> write!(f, "Connection Timeout"),
         }
     }
 }

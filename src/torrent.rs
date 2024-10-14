@@ -125,13 +125,37 @@ pub struct TorrentInfo {
 }
 
 impl TorrentInfo {
+
+    pub fn calculate_info_hash(info: &Info) -> [u8; 20] {
+        let info_encoded = serde_bencode::to_bytes(info).expect("Failed to encode info dictionary");
+        let mut hasher = Sha1::new();
+        hasher.update(&info_encoded);
+        hasher.finalize().try_into().expect("Hash output should be 20 bytes")
+    }
+    
     pub fn calculate_length(info: &Info) -> i64 {
         match &info.keys {
             Keys::SingleFile { length } => *length as i64,
             Keys::MultiFile { files } => files.iter().map(|f| f.length as i64).sum(),
         }
     }
+    pub fn validate_metadata(metadata: &[u8], expected_info_hash: &str) -> Result<Self> {
+        let info: Info = serde_bencode::from_bytes(metadata)?;
+        let calculated_info_hash = hex::encode(Self::calculate_info_hash(&info));
 
+        if calculated_info_hash != expected_info_hash {
+            return Err(TorrentError::InvalidInfoHash);
+        }
+
+        Ok(TorrentInfo {
+            announce: String::new(), // We don't have this information from metadata
+            info_hash: calculated_info_hash,
+            length: Self::calculate_length(&info),
+            name: info.name,
+            piece_length: info.piece_length as i64,
+            pieces: info.pieces.0,
+        })
+    }
     pub fn from_magnet(magnet: &magnet::Magnet) -> Result<Self> {
         Ok(TorrentInfo {
             announce: magnet.tracker_url.clone().unwrap_or_default(),

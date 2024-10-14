@@ -1,9 +1,10 @@
 use crate::{torrent::TorrentInfo, tracker::TrackerResponse, magnet, error::{Result, TorrentError}};
-use tokio::net::TcpStream;
+use tokio::{net::TcpStream, time::timeout};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use rand::Rng;
 use std::time::Duration;
 use tokio::time::sleep;
+use serde_bencode::value as BencodeValue;
 
 const PROTOCOL: &str = "BitTorrent protocol";
 const MAX_HANDSHAKE_ATTEMPTS: usize = 5;
@@ -11,9 +12,7 @@ const MAX_HANDSHAKE_ATTEMPTS: usize = 5;
 pub struct Peer {
     stream: TcpStream,
     supports_extensions: bool,
-    extension_handshake: Option<serde_json::Value>,
-    metadata_size: Option<usize>,
-    metadata_pieces: Vec<Option<Vec<u8>>>,
+    extension_handshake: Option<BencodeValue::Value>,
 
 }
 
@@ -30,8 +29,6 @@ impl Peer {
             stream,
             supports_extensions: true,
             extension_handshake: None,
-            metadata_size: None,
-            metadata_pieces: Vec::new(),
         })
     }
 
@@ -40,7 +37,7 @@ impl Peer {
             .map_err(|e| TorrentError::ConnectionFailed(format!("Failed to set TCP_NODELAY: {}", e)))?;
         Ok(())
     }
-    
+
 
     pub async fn handshake(&mut self, info_hash: &[u8; 20], peer_id: &[u8; 20]) -> Result<[u8; 20]> {
         let mut handshake = vec![19];
@@ -105,7 +102,7 @@ impl Peer {
     pub async fn receive_bitfield(&mut self) -> Result<()> {
         let message = self.receive_message().await?;
         if message.id != 5 {
-            return Err(TorrentError::UnexpectedMessage);
+            return Err(TorrentError::UnexpectedMessage("Expected bitfield message".to_string()));
         }
         Ok(())
     }
@@ -119,7 +116,7 @@ impl Peer {
     pub async fn receive_unchoke(&mut self) -> Result<()> {
         let message = self.receive_message().await?;
         if message.id != 1 {
-            return Err(TorrentError::UnexpectedMessage);
+            return Err(TorrentError::UnexpectedMessage("Expected unchoke message".to_string()));
         }
         println!("Received 'unchoke' message.");
         Ok(())
@@ -140,7 +137,7 @@ impl Peer {
     pub async fn receive_block(&mut self, expected_index: usize, expected_begin: usize) -> Result<Vec<u8>> {
         let message = self.receive_message().await?;
         if message.id != 7 {
-            return Err(TorrentError::UnexpectedMessage);
+            return Err(TorrentError::UnexpectedMessage("Expected block message".to_string()));
         }
 
         if message.payload.len() < 8 {
@@ -167,74 +164,87 @@ impl Peer {
     }
 
     async fn receive_message(&mut self) -> Result<PeerMessage> {
+        const TIMEOUT_DURATION: Duration = Duration::from_secs(30);
+    
+        // Read the message length (4 bytes)
         let mut length_bytes = [0u8; 4];
-        self.stream.read_exact(&mut length_bytes).await
-            .map_err(|e| TorrentError::ConnectionFailed(format!("Failed to read message length: {}", e)))?;
+        timeout(TIMEOUT_DURATION, self.stream.read_exact(&mut length_bytes)).await
+            .map_err(|_| TorrentError::ConnectionTimeout)??;
+    
         let length = u32::from_be_bytes(length_bytes) as usize;
-
+        // println!("Received message length: {} bytes", length);
+    
         if length == 0 {
-            return Err(TorrentError::UnexpectedMessage);
+            // Keep-alive message with no payload
+            return Ok(PeerMessage { id: 0, payload: Vec::new() });
         }
-
-        let mut message = vec![0u8; length];
-        self.stream.read_exact(&mut message).await
-            .map_err(|e| TorrentError::ConnectionFailed(format!("Failed to read message: {}", e)))?;
-
-        Ok(PeerMessage {
-            id: message[0],
-            payload: message[1..].to_vec(),
-        })
+    
+        // Read the message body
+        let mut buffer = vec![0u8; length];
+        let mut total_read = 0;
+    
+        while total_read < length {
+            match timeout(TIMEOUT_DURATION, self.stream.read(&mut buffer[total_read..])).await {
+                Ok(Ok(0)) => return Err(TorrentError::ConnectionClosed),
+                Ok(Ok(n)) => {
+                    total_read += n;
+                    // println!("Read {} bytes, total: {}/{}", n, total_read, length);
+                },
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Ok(Err(e)) => return Err(TorrentError::ConnectionFailed(format!("Failed to read message: {}", e))),
+                Err(_) => return Err(TorrentError::ConnectionTimeout),
+            }
+        }
+    
+        // Parse the message
+        let id = buffer[0];
+        let payload = buffer[1..].to_vec();
+    
+        // println!("Received message: ID={}, payload length={}", id, payload.len());
+        Ok(PeerMessage { id, payload })
     }
-
+    
 
     pub async fn receive_metadata(&mut self) -> Result<Vec<u8>> {
         let message = self.receive_message().await?;
         if message.id != 20 {
-            return Err(TorrentError::UnexpectedMessage);
+            return Err(TorrentError::UnexpectedMessage("Expected message ID 20".to_string()));
         }
+        // println!("Received message: ID={}", message.id);
 
-        let extension_id = message.payload[0];
-        if extension_id != self.get_metadata_extension_id()? {
-            return Err(TorrentError::UnexpectedMessage);
-        }
-
+        let _extension_id = message.payload[0];
+        // println!("Received extension ID: {}", extension_id);
+        
         let payload = &message.payload[1..];
         let dict: serde_bencode::value::Value = serde_bencode::from_bytes(payload)?;
-
-        if let serde_bencode::value::Value::Dict(dict) = dict {
-            let msg_type = dict.get(&b"msg_type".to_vec()).and_then(|v| {
-                if let serde_bencode::value::Value::Int(i) = v {
-                    Some(*i)
-                } else {
-                    None
-                }
-            }).ok_or(TorrentError::InvalidMetadataResponse)?;
-            let piece = dict.get(&b"piece".to_vec()).and_then(|v| {
-                if let serde_bencode::value::Value::Int(i) = v {
-                    Some(*i)
-                } else {
-                    None
-                }
-            }).ok_or(TorrentError::InvalidMetadataResponse)?;
-            let total_size = dict.get(&b"total_size".to_vec()).and_then(|v| {
-                if let serde_bencode::value::Value::Int(i) = v {
-                    Some(*i)
-                } else {
-                    None
-                }
-            }).ok_or(TorrentError::InvalidMetadataResponse)?;
-
-            if msg_type != 1 || piece != 0 {
-                return Err(TorrentError::InvalidMetadataResponse);
-            }
-
-            let metadata_start = payload.len() - total_size as usize;
-            Ok(payload[metadata_start..].to_vec())
-        } else {
-            Err(TorrentError::InvalidMetadataResponse)
-        }
-    }
     
+        // println!("Received message: ID={}, payload={:?}", message.id, message.payload);
+    
+        if let serde_bencode::value::Value::Dict(d) = dict {
+            let msg_type = d.get(&b"msg_type".to_vec())
+                .and_then(|v| if let serde_bencode::value::Value::Int(i) = v { Some(*i) } else { None })
+                .ok_or(TorrentError::InvalidMetadataResponse)?;
+            let piece = d.get(&b"piece".to_vec())
+                .and_then(|v| if let serde_bencode::value::Value::Int(i) = v { Some(*i) } else { None })
+                .ok_or(TorrentError::InvalidMetadataResponse)?;
+            
+            if msg_type == 1 && piece == 0 {
+                let encoded_dict = serde_bencode::to_bytes(&serde_bencode::value::Value::Dict(d.clone()))?;
+                let dict_length = encoded_dict.len();
+    
+                if payload.len() > dict_length {
+                    let metadata = &payload[dict_length..];
+                    println!("Received metadata: length={}", metadata.len());
+                    return Ok(metadata.to_vec());
+                }
+            }
+        }
+    
+        Err(TorrentError::InvalidMetadataResponse)
+    }    
+    
+    
+
     pub async fn send_metadata_request(&mut self) -> Result<()> {
         let extension_id = self.get_metadata_extension_id()?;
 
@@ -255,25 +265,21 @@ impl Peer {
         println!("Sent metadata request");
         Ok(())
     }
-    fn get_metadata_size(&self) -> Result<usize> {
-        self.extension_handshake
-            .as_ref()
-            .and_then(|handshake| handshake.get("metadata_size"))
-            .and_then(|size| size.as_u64())
-            .map(|size| size as usize)
-            .ok_or(TorrentError::MetadataSizeNotFound)
-    }
+
     fn get_metadata_extension_id(&self) -> Result<u8> {
-        self.extension_handshake
-            .as_ref()
-            .and_then(|handshake| handshake.get("m"))
-            .and_then(|m| m.get("ut_metadata"))
-            .and_then(|ut_metadata| ut_metadata.as_u64())
-            .map(|id| id as u8)
-            .ok_or(TorrentError::MetadataExtensionNotSupported)
+        if let Some(serde_bencode::value::Value::Dict(dict)) = &self.extension_handshake {
+            if let Some(serde_bencode::value::Value::Dict(m_dict)) = dict.get(&b"m".to_vec()) {
+                if let Some(serde_bencode::value::Value::Int(id)) = m_dict.get(&b"ut_metadata".to_vec()) {
+                    return Ok(*id as u8);
+                }
+            }
+        }
+        Err(TorrentError::MetadataExtensionNotSupported)
     }
-    
-    async fn receive_extension_handshake(&mut self) -> Result<()> {
+
+
+
+    pub async fn receive_extension_handshake(&mut self) -> Result<()> {
         loop {
             let message = self.receive_message().await?;
             match message.id {
@@ -285,13 +291,13 @@ impl Peer {
                     let extended_id = message.payload[0];
                     if extended_id == 0 {
                         // Extension handshake
-                        let handshake_data: serde_json::Value = serde_bencode::from_bytes(&message.payload[1..])?;
+                        let handshake_data: serde_bencode::value::Value = serde_bencode::from_bytes(&message.payload[1..])?;
                         self.extension_handshake = Some(handshake_data.clone());
-    
-                        println!("Received extension handshake: {:?}", self.extension_handshake);
-                        if let Some(m) = handshake_data.get("m") {
-                            if let Some(ut_metadata) = m.get("ut_metadata") {
-                                if let Some(id) = ut_metadata.as_u64() {
+
+                        // println!("Received extension handshake: {:?}", self.extension_handshake);
+                        if let Some(serde_bencode::value::Value::Dict(dict)) = &self.extension_handshake {
+                            if let Some(serde_bencode::value::Value::Dict(m_dict)) = dict.get(&b"m".to_vec()) {
+                                if let Some(serde_bencode::value::Value::Int(id)) = m_dict.get(&b"ut_metadata".to_vec()) {
                                     println!("Peer Metadata Extension ID: {}", id);
                                 }
                             }
@@ -306,18 +312,16 @@ impl Peer {
                     // Bitfield message
                     println!("Received bitfield message");
                     // You can process the bitfield here if needed
-                    // For now, we'll just continue to the next message
                 },
                 _ => {
                     // Handle other message types or ignore
                     println!("Received message with ID: {}", message.id);
-                    // For this implementation, we'll continue to wait for the extension handshake
                 }
             }
         }
     }
 
-    async fn send_extension_handshake(&mut self) -> Result<()> {
+    pub async fn send_extension_handshake(&mut self) -> Result<()> {
         let extension_handshake = {
             let mut m = std::collections::HashMap::new();
             m.insert("ut_metadata".to_string(), 1u8);
@@ -346,10 +350,7 @@ impl Peer {
         if tracker_response.peers.0.is_empty() {
             return Err(TorrentError::NoPeersAvailable);
         }
-        self.send_metadata_request().await?;
-        let metadata = self.receive_metadata().await?;
 
-        let info_dict: serde_bencode::value::Value = serde_bencode::from_bytes(&metadata)?;
   
         Ok(received_peer_id)
     }
